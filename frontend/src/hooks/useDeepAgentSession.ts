@@ -22,6 +22,10 @@ export function useDeepAgentSession() {
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const heartbeatTimerRef = useRef<number | undefined>(undefined);
   const uploadedNameSetRef = useRef<Set<string>>(new Set());
+  const runIdRef = useRef<string | null>(null);
+  const startingRef = useRef(false);
+  const bufferedEventsRef = useRef<MonitorMessage[]>([]);
+  const processEventRef = useRef<(payload: MonitorMessage) => void>(() => {});
   const [threadId, setThreadId] = useState(getStoredThreadId);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [events, setEvents] = useState<MonitorMessage[]>([]);
@@ -57,6 +61,8 @@ export function useDeepAgentSession() {
     setLastError("");
     setUploadedItems([]);
     uploadedNameSetRef.current.clear();
+    runIdRef.current = null;
+    bufferedEventsRef.current = [];
     setIsRunning(false);
     setIsCancelling(false);
   }, []);
@@ -113,6 +119,21 @@ export function useDeepAgentSession() {
             return;
           }
 
+          if (startingRef.current) {
+            bufferedEventsRef.current.push(payload);
+            return;
+          }
+          processEventRef.current(payload);
+        } catch (error) {
+          setLastError(error instanceof Error ? error.message : "WebSocket 消息解析失败");
+        }
+      };
+
+      processEventRef.current = (payload: MonitorMessage) => {
+          const runId = extractString(payload.data, "run_id");
+          if (runId && runIdRef.current && runId !== runIdRef.current) {
+            return;
+          }
           setEvents((previous) => [...previous, payload].slice(-MAX_EVENTS));
 
           if (payload.event === "session_created") {
@@ -140,9 +161,6 @@ export function useDeepAgentSession() {
             setIsRunning(false);
             setIsCancelling(false);
           }
-        } catch (error) {
-          setLastError(error instanceof Error ? error.message : "WebSocket 消息解析失败");
-        }
       };
 
       socket.onerror = () => {
@@ -204,14 +222,22 @@ export function useDeepAgentSession() {
       setEvents([]);
       setResult("");
       setLastError("");
+      startingRef.current = true;
+      bufferedEventsRef.current = [];
       try {
         const response = await startTask(cleanQuery, threadId);
+        runIdRef.current = response.run_id || null;
+        startingRef.current = false;
+        bufferedEventsRef.current.forEach((payload) => processEventRef.current(payload));
+        bufferedEventsRef.current = [];
         if (response.thread_id && response.thread_id !== threadId) {
           storeThreadId(response.thread_id);
           setThreadId(response.thread_id);
         }
         return response;
       } catch (error) {
+        startingRef.current = false;
+        bufferedEventsRef.current = [];
         setIsRunning(false);
         setIsCancelling(false);
         throw error;

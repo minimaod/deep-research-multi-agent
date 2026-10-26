@@ -8,6 +8,7 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 
 from app.agent.prompts import sub_agents_content
 from app.tools.db_tools import execute_sql_query, get_table_data, list_sql_tables
+from app.harness.middleware import ProviderHarnessMiddleware
 
 # 数据库助手必须按“列出表 -> 预览表数据 -> 执行 SQL”的顺序获取真实上下文
 # tools 列表中的三个工具共同约束了这个查询链路
@@ -16,4 +17,5 @@ database_query_agent = {
     "description": sub_agents_content["db"]["description"],
     "system_prompt": sub_agents_content["db"]["system_prompt"],
     "tools": [list_sql_tables, get_table_data, execute_sql_query],
+    "middleware": [ProviderHarnessMiddleware()],
 }

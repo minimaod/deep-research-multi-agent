@@ -8,6 +8,7 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 
 from app.agent.prompts import sub_agents_content
 from app.tools.ragflow_tools import create_ask_delete, get_assistant_list
+from app.harness.middleware import ProviderHarnessMiddleware
 
 # RAGFlow 子智能体处理内部非结构化文档，与网络搜索助手、数据库查询助手形成互补
 # 它遵循“先查助手列表 -> 再向指定助手提问”的工作顺序
@@ -17,4 +18,5 @@ knowledge_base_agent = {
     "description": sub_agents_content["ragflow"]["description"],
     "system_prompt": sub_agents_content["ragflow"]["system_prompt"],
     "tools": [get_assistant_list, create_ask_delete],
+    "middleware": [ProviderHarnessMiddleware()],
 }

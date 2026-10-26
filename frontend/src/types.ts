@@ -4,6 +4,10 @@ export type MonitorEventName =
   | "session_created"
   | "tool_start"
   | "assistant_call"
+  | "assistant_progress"
+  | "tool_end"
+  | "tool_degraded"
+  | "context_trimmed"
   | "task_result"
   | "task_cancelled"
   | "error"
@@ -27,6 +31,7 @@ export type SocketMessage = MonitorMessage | PongMessage;
 export interface TaskResponse {
   status: "started" | string;
   thread_id: string;
+  run_id?: string;
 }
 
 export interface CancelTaskResponse {

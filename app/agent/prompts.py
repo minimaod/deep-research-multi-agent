@@ -35,4 +35,7 @@ main_agent_content = prompt_yaml_content["main_agent"]
 # 子智能体配置集合，包含 name、description 和 system_prompt
 sub_agents_content = prompt_yaml_content["sub_agents"]
 
-print(sub_agents_content)
+_harness_rules = prompt_yaml_content.get("harness_rules", "")
+main_agent_content["system_prompt"] += "\n" + _harness_rules
+for _config in sub_agents_content.values():
+    _config["system_prompt"] += "\n" + _harness_rules

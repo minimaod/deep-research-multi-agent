@@ -9,6 +9,7 @@ WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执�
 import asyncio
 import shutil
 import uuid
+import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
@@ -25,10 +26,11 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
+from app.harness.runtime import RunState, active_runs
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -42,6 +44,14 @@ async def lifespan(_app: FastAPI):
     manager.set_loop(loop)
     print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
     yield
+    pending = [task for task in active_tasks.values() if not task.done()]
+    for state in active_runs.values():
+        state.cancelled.set()
+    for task in pending:
+        if not task.cancelling():
+            task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=2)
 
 
 # 当前文件位于 app/api/server.py，运行时目录统一收敛到 app 目录
@@ -52,6 +62,26 @@ app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}
+task_locks = weakref.WeakValueDictionary()
+
+
+def session_lock(thread_id):
+    lock = task_locks.get(thread_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        task_locks[thread_id] = lock
+    return lock
+
+
+async def stop_task(thread_id, task):
+    state = active_runs.get(thread_id)
+    if state:
+        state.cancelled.set()
+    if not task.cancelling():
+        task.cancel()
+    # wait_for would inject a second cancellation into finally cleanup.
+    done, _ = await asyncio.wait({task}, timeout=1.0)
+    return bool(done)
 
 # output 保存每个会话最终工作区，前端只允许从这里浏览和下载生成文件
 output_dir = project_root / "output"
@@ -74,8 +104,15 @@ app.add_middleware(
 class TaskRequest(BaseModel):
     """前端启动任务时提交的请求体。"""
 
-    query: str
-    thread_id: str = None
+    query: str = Field(min_length=1, max_length=20000)
+    thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+    @field_validator("query")
+    @classmethod
+    def nonblank_query(cls, value):
+        if not value.strip():
+            raise ValueError("query cannot be blank")
+        return value
 
 
 def _forget_task(thread_id: str, task: asyncio.Task) -> None:
@@ -87,6 +124,8 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
     """
     if active_tasks.get(thread_id) is task:
         active_tasks.pop(thread_id, None)
+    if not task.cancelled():
+        task.exception()  # retrieve exceptions from background tasks
 
 
 @app.post("/api/task")
@@ -100,16 +139,17 @@ async def run_task(request: TaskRequest):
     thread_id = request.thread_id or str(uuid.uuid4())
 
     # 同一个 thread_id 只保留一个活跃任务，新任务会先取消旧任务，避免并发写同一会话目录
-    old_task = active_tasks.get(thread_id)
-    if old_task and not old_task.done():
-        old_task.cancel()
-
-    # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
-    active_tasks[thread_id] = task
-    task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
-
-    return {"status": "started", "thread_id": thread_id}
+    async with session_lock(thread_id):
+        old_task = active_tasks.get(thread_id)
+        if old_task and not old_task.done():
+            if not await stop_task(thread_id, old_task):
+                raise HTTPException(status_code=409, detail="旧任务正在安全清理，请稍后重试")
+        state = RunState(thread_id)
+        active_runs[thread_id] = state
+        task = asyncio.create_task(run_deep_agent(request.query, thread_id, run_id=state.run_id))
+        active_tasks[thread_id] = task
+        task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
+    return {"status": "started", "thread_id": thread_id, "run_id": state.run_id}
 
 
 @app.post("/api/task/{thread_id}/cancel")
@@ -120,26 +160,15 @@ async def cancel_task(thread_id: str):
     注意：取消会向 asyncio.Task 注入 CancelledError。若底层第三方工具正在执行不可中断
     的同步阻塞调用，任务可能需要等该调用返回后才会真正结束。
     """
-    task = active_tasks.get(thread_id)
-    if not task or task.done():
-        active_tasks.pop(thread_id, None)
-        raise HTTPException(status_code=404, detail="任务不存在或已结束")
-
-    # 先发出取消信号，再短暂等待协程响应；若底层阻塞中，则返回 cancelling 给前端继续展示状态
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=1.0)
-    except asyncio.CancelledError:
-        _forget_task(thread_id, task)
-        return {"status": "cancelled", "thread_id": thread_id}
-    except asyncio.TimeoutError:
-        return {"status": "cancelling", "thread_id": thread_id}
-    except Exception as e:
-        _forget_task(thread_id, task)
-        return {"status": "cancelled", "thread_id": thread_id, "message": str(e)}
-
-    _forget_task(thread_id, task)
-    return {"status": "cancelled", "thread_id": thread_id}
+    async with session_lock(thread_id):
+        task = active_tasks.get(thread_id)
+        if not task or task.done():
+            active_tasks.pop(thread_id, None)
+            raise HTTPException(status_code=404, detail="任务不存在或已结束")
+        finished = await stop_task(thread_id, task)
+        state = active_runs.get(thread_id)
+        return {"status": "cancelled" if finished else "cancelling", "thread_id": thread_id,
+                "run_id": state.run_id if state else None}
 
 
 @app.post("/api/upload")
@@ -157,6 +186,11 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
         thread_id (str): 关联的任务会话 ID。
     """
     # 上传文件先按会话隔离保存，避免不同任务读取到彼此的附件
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id):
+        raise HTTPException(status_code=422, detail="无效会话ID")
+    if any(not file.filename or Path(file.filename).name != file.filename or any(c in file.filename for c in ('/', '\\', ':')) or file.filename in {'.', '..'} for file in files):
+        raise HTTPException(status_code=422, detail="文件名必须是不含目录的名称")
     target_dir = updated_dir / f"session_{thread_id}"
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -235,7 +269,7 @@ async def list_files(path: str):
     try:
         # 递归返回文件元数据，前端据此渲染文件列表并发起下载请求
         for file_path in abs_path.rglob("*"):
-            if file_path.is_file():
+            if file_path.is_file() and ".harness_evidence" not in file_path.parts:
                 stat = file_path.stat()
                 files.append(
                     {

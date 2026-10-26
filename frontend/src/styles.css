@@ -1817,3 +1817,8 @@ textarea {
     display: none;
   }
 }
+.thinking-event--tool_degraded {
+  border-left: 3px solid #d99b24;
+  background: #fff9ec;
+}
+.thinking-event--tool_degraded strong { color: #925d00; }

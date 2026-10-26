@@ -64,3 +64,6 @@ testem.log
 # System Files
 .DS_Store
 Thumbs.db
+
+# Local interview notes: never publish.
+/INTERVIEW_PREP_DEEP_RESEARCH.md

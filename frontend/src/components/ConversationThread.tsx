@@ -12,6 +12,7 @@ import {
   FileTextOutlined,
   StopOutlined,
   ToolOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
@@ -144,6 +145,9 @@ function getThinkingDuration(
 }
 
 function EventIcon({ event }: { event: string }) {
+  if (event === "tool_degraded") {
+    return <WarningOutlined aria-hidden />;
+  }
   if (event === "assistant_call") {
     return <BranchesOutlined aria-hidden />;
   }
@@ -216,8 +220,12 @@ function ThinkingTimeline({ events }: { events: MonitorMessage[] }) {
               </time>
             </div>
             <p>{event.message}</p>
+            {typeof event.data.cost_ms === "number" ? (
+              <span>耗时 {event.data.cost_ms.toFixed(0)} ms · 尝试 {String(event.data.attempts ?? 1)} 次</span>
+            ) : null}
+            {event.event === "tool_degraded" ? <strong role="status">来源暂不可用，正在补齐证据</strong> : null}
             {event.event === "assistant_call" ||
-            event.event === "tool_start" ? (
+            event.event === "tool_start" || event.event === "assistant_progress" || event.event === "context_trimmed" || event.event === "tool_degraded" ? (
               <code>{JSON.stringify(event.data)}</code>
             ) : null}
           </div>

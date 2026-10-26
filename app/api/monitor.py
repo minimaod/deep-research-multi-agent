@@ -13,6 +13,7 @@ from typing import Any, Optional
 from fastapi import WebSocket
 
 from app.api.context import get_thread_context
+from app.harness.runtime import accept_event, active_runs, event_context
 
 
 class ToolMonitor:
@@ -48,11 +49,13 @@ class ToolMonitor:
         :param message: 面向前端展示的事件说明
         :param data: 附加结构化数据
         """
+        if not accept_event(event_type):
+            return
         payload = {
             "type": "monitor_event",
             "event": event_type,
             "message": message,
-            "data": data or {},
+            "data": {**(data or {}), **event_context()},
             "timestamp": datetime.datetime.now().isoformat(),
         }
 
@@ -177,9 +180,18 @@ class ConnectionManager:
 
     async def send_to_thread(self, message: dict[str, Any], thread_id: str) -> None:
         """向指定 thread_id 对应的前端连接发送 JSON 消息"""
+        run_id = message.get("data", {}).get("run_id")
+        current = active_runs.get(thread_id)
+        if run_id and current and current.run_id != run_id:
+            return
+        if current and current.cancelled.is_set() and message.get("event") != "task_cancelled":
+            return
         if thread_id in self.active_connections:
             websocket = self.active_connections[thread_id]
-            await websocket.send_json(message)
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                self.disconnect(websocket, thread_id)
 
 
 manager = ConnectionManager()
